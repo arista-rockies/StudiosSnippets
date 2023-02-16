@@ -15,7 +15,7 @@ debug = False
 def output(outStr, indent=2, level=0, flush=True):
     # if the input is not a string, let's just use the default converter
     #  for whatevever it is and hope for the best.
-    if not isintance(outStr, str):
+    if not isinstance(outStr, str):
         outStr = f'{outStr}'
     context.write(f'{outStr.rjust((indent*level)+len(outStr))}')
     if flush:
