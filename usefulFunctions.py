@@ -1,7 +1,69 @@
-# the debug boolean will dump data into the message of the day tag
-#  on the switch.  this is a rough way to get debug text out while
-#  development is happening.  do not enable this flag in production
 DEBUG = False
+if DEBUG:
+    ctx.benchmarkingOn()
+
+# this is a convenience class to manage tags.  it's a dict with some special sauce
+#   it inherits from dict and functions largely similarly with the exception of
+#     a save function which will write to aeris -- this could have the load in it as well?
+#     each key value is generally assumed to be a list of the tag values.
+#       a get on a key will return the 0th item if there is only one item in the last.
+#         else it will return
+#       a set on a key will append a value to the list
+#     setRaw() and getRaw() will get or set unconditionally the underlying value
+#     setGenerated() will sets a flag to enable saving of new generated tags only
+# some of this code borrowed from cvlib
+class Tags(dict):
+    def __init__(self):
+        self._generated = list()
+        self.tagsType = 'device'
+        super().__init__()
+
+    def setGenerated(self, key: str):
+        if key in self.keys() and key not in self._generated:
+            self._generated.append(key)
+
+    def saveGenerated(self, device: Device):
+        for key in self._generated:
+            v = super().__getitem__(key)
+            
+            # depending on our type we have a different code path to save:
+            if self.tagsType == 'interface':
+                if DEBUG:
+                    output(f"saving interfaceTag: {key} -> {v} on {device.id}")
+                continue
+            else:
+                if DEBUG:
+                    output(f"saving deviceTag: {key} -> {str(v[0])} on {device.id}")
+
+                device._assignTag(ctx, Tag(str(key), str(v[0])), replaceValue=False)
+
+    def setRaw(self, key: str, value: str):
+        super().__setitem__(key, value)
+
+    def getRaw(self, key: str):
+        return super().get(key)
+
+    def __setitem__(self, key: str, value: str):
+        if key in self.keys():
+            super().__getitem__(key).append(value)
+        else:
+            if isinstance(value, Tags):
+                super().__setitem__(key, value)
+            else:
+                super().__setitem__(key, [value])
+
+    def __getitem__(self, key: str) -> Any:
+        if key in self.keys():
+            k = super().__getitem__(key)
+            if isinstance(k, Tags):
+                return k
+
+            l = len(k)
+            if l > 1:
+                return k
+            elif l == 1:
+                return k[0]
+        return None
 
 # this function uses the mako context to output a formatted string
 #  for cvp to process the generated configuration it's important
@@ -9,122 +71,39 @@ DEBUG = False
 #  the user to specify that manually on every line we append it here
 #  unless asked not to. this method of indenting will almost certainly
 #  not behave as intended for complex types
-def output(outStr, indent=2, level=0, flush=True):
+def output(outStr: str, indent: int=2, level: int=0, flush: bool=True):
     # if the input is not a string, let's just use the default converter
     #  for whatevever it is and hope for the best.
-    if not isinstance(outStr, str):
-        outStr = f'{outStr}'
+    if DEBUG:
+        if not isinstance(outStr, str):
+            outStr = f'{outStr}'
+        if not outStr:
+            return
+
     context.write(f'{outStr.rjust((indent*level)+len(outStr))}')
     if flush:
         context.write("\n")
 
-# this next block of code will add a python decorator to the studio
-#  which will allow you to time each function to see how long it takes
-#  before the function prototype, add a line @benchmark.  This
-#  will automatically be called and do some magic time collection
-#  you'll never call benchmark() directly.  at the end of the studio
-#  you can call dumpStats and pass in the stats structure to log the
-#  results using the built in log system, not the banner
-from time import perf_counter, process_time_ns
-from collections.abc import Callable
-from typing import Any
-
-stats = {}
-
-def benchmark(func: Callable[..., Any]) -> Callable[..., Any]:
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
-        startTime = process_time_ns() #perf_counter()
-        result = func(*args, **kwargs)
-        timer = process_time_ns() - startTime
-        if not func.__name__ in stats:
-            stats[func.__name__] = {'sum': 0, 'count': 0, 'timings': []}
-        stats[func.__name__]['count'] += 1
-        stats[func.__name__]['sum'] += timer
-        stats[func.__name__]['timings'].append(timer)
-        return result
-    if not DEBUG:
-        return func
-    else:
-        return wrapper
-
-def dumpStats(stats):
+# we could use the builtin stats dump, but formatting is a little funny so i'm overriding it here
+def dumpStats(stats: dict):
     from statistics import mean
     for fun, timings in stats.items():
         stats[fun]['average'] = timings['sum']/timings['count']/1e9
     for fun, timings in dict(sorted(stats.items(), key=lambda item: item[1]['average'], reverse=True)).items():
-        ctx.info(f"{fun:<40}: {timings['average']:>25}s{timings['count']:>5} iteration(s)")
+        output(f"{fun:<40}: {timings['average']:>25.2f}s{timings['count']:>5} iteration(s)")
 
 # this function will fetch and return a dictionary of all tags for a specified device within the workspace
 #  the dictionary's keys are the tag label, the values are stored in a list - regardless as to how many
 #  values for a given tag exist.   (if the tag exists with a single value you'll get a list with one item)
-from arista.tag.v2.services import (
-    TagAssignmentConfigServiceStub,
-    TagAssignmentConfigStreamRequest,
-    TagAssignmentServiceStub,
-    TagAssignmentStreamRequest
-)
+@ctx.benchmark
+def getTagForDeviceByLabel(workspaceID: str, tagLabelList: list[str]) -> Tags:
+    result = Tags()
 
-from arista.tag.v2.tag_pb2 import (
-    TagAssignmentConfig,
-    TagAssignment,
-    ELEMENT_TYPE_DEVICE,
-    CREATOR_TYPE_USER
-)
-
-from copy import deepcopy
-
-@benchmark
-def getTagForDeviceByLabel(workspaceID, tagLabelList):
-    result = {}
-    initializer = {}
-
-    workspaceTagClient = ctx.getApiClient(TagAssignmentConfigServiceStub)
-    workspaceGetAllRequest = TagAssignmentConfigStreamRequest()
-    workspaceTagFilter = TagAssignmentConfig()
-
-    mainlineTagClient = ctx.getApiClient(TagAssignmentServiceStub)
-    mainlineGetAllRequest = TagAssignmentStreamRequest()
-    mainlineTagFilter = TagAssignment()
-
-    workspaceTagFilter.key.element_type = mainlineTagFilter.key.element_type = ELEMENT_TYPE_DEVICE
-    mainlineTagFilter.tag_creator_type = CREATOR_TYPE_USER
-
-    # now let's set up all the filtering
-    for tag in tagLabelList:
-        mainlineTagFilter.key.workspace_id.value = ""
-        workspaceTagFilter.key.workspace_id.value = workspaceID
-        workspaceTagFilter.key.label.value = mainlineTagFilter.key.label.value = tag
-
-        mainlineGetAllRequest.partial_eq_filter.append(mainlineTagFilter)
-        workspaceGetAllRequest.partial_eq_filter.append(workspaceTagFilter)
-
-        initializer[tag] = []
-
-    # first thing to do is load up all the mainline tags
-    for resp in mainlineTagClient.GetAll(mainlineGetAllRequest):
-        label = resp.value.key.label.value
-        value = resp.value.key.value.value
-        deviceID = resp.value.key.device_id.value
-        if deviceID not in result:
-            result[deviceID] = deepcopy(initializer)
-        result[deviceID][label].append(value)
-
-    # now that i have all the mainline, let's add the workspace stuff in
-    for resp in workspaceTagClient.GetAll(workspaceGetAllRequest):
-        label = resp.value.key.label.value
-        value = resp.value.key.value.value
-        deviceID = resp.value.key.device_id.value
-
-        if resp.value.remove.value == True:
-            # this workspace entry is being removed from mainline
-            try:
-                result[deviceID][label].remove(value)
-            except ValueError:
-                pass
-        else:
-            # this is a new addition to from the workspace.  we need to append it
-            if value not in result[deviceID][label]:
-                result[deviceID][label].append(value)
+    for device in ctx.topology.getDevices():
+        result[device.id] = Tags()
+        for tag in device.getTags(ctx):
+            if tag.label in tagLabelList:
+                result[device.id][tag.label] = tag.value
 
     return result
 
@@ -138,5 +117,5 @@ deviceTags = getTagForDeviceByLabel(workspace_id, interestingTagLabels)
 output(deviceTags)
 
 if DEBUG:
+    dumpStats(ctx.stats)
     output("EOF")
-    dumpStats(stats)
