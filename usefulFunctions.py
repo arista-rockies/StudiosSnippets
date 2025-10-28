@@ -1,3 +1,12 @@
+<%
+import ipaddress, itertools
+from time import process_time_ns
+from collections.abc import Callable
+from typing import Any
+
+from cloudvision.cvlib.tags import Tag
+from cloudvision.cvlib.device import Device
+
 DEBUG = False
 if DEBUG:
     ctx.benchmarkingOn()
@@ -119,3 +128,4 @@ output(deviceTags)
 if DEBUG:
     dumpStats(ctx.stats)
     output("EOF")
+%>
