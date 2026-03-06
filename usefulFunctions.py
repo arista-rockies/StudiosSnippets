@@ -80,14 +80,16 @@ class Tags(dict):
 #  the user to specify that manually on every line we append it here
 #  unless asked not to. this method of indenting will almost certainly
 #  not behave as intended for complex types
-def output(outStr: str, indent: int=2, level: int=0, flush: bool=True):
+def output(outStr: str, indent: int=2, level: int=0, flush: bool=True, isDebug: bool=False):
+    if isDebug and not DEBUG:
+        return
+
     # if the input is not a string, let's just use the default converter
     #  for whatevever it is and hope for the best.
-    if DEBUG:
-        if not isinstance(outStr, str):
-            outStr = f'{outStr}'
-        if not outStr:
-            return
+    if not isinstance(outStr, str):
+        outStr = f'{outStr}'
+    if not outStr:
+        return
 
     context.write(f'{outStr.rjust((indent*level)+len(outStr))}')
     if flush:
